@@ -22,3 +22,10 @@ docs/site/
 # committed for packages, but should be committed for applications that require a static
 # environment.
 Manifest.toml
+
+# Ignore backup.jl files generates by Pluto
+src/*backup*
+
+# Ignore any temp csvs stored in src/
+src/*.csv
+src/*.csv*
