@@ -13,8 +13,6 @@ The end-to-end investigation is available in the Pluto notebook provided, and an
 ## Motivation
 This repo was largely to showcase how `Turing.jl` can be used as a very flexible modelling library, given the support contraints when $\xi$ fluxuates around zero.
 
-In addition, there has been little attention given to EVT in Julia.
-
 ## TODO
 - [ ] Add example of Generalised Pareto Distribution
 - [ ] Demonstrate how Bayesian neural networks can help model rare events by utilising block maxima / peaks-over-threshold to model the tails.
