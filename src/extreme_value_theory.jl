@@ -339,7 +339,7 @@ end
 
 # ╔═╡ 942e558f-c6bc-46c5-af70-88139ed210b9
 md"""
-Finally, we can get the return period (antoher way of representing our quantile function), where we plot the 1-in-n year events and the corresponding water elevation:
+Finally, we can get the return period (another way of representing our quantile function), where we plot the 1-in-n year events and the corresponding water elevation:
 """
 
 # ╔═╡ 66db6de0-d47e-4c96-8e37-3055222dada5
