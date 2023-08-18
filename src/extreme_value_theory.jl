@@ -29,9 +29,19 @@ The BM observations are modelled to a Generalised Extreme Value (GEV) distributi
 
 $$X \sim GEV(\mu,\sigma,\xi)$$
 
-According to extreme value theorem, a normalised sequence of IID maxima/minima of a sequence of random variables tends towards the GEV disribution.
+$$P(X \leq x) = F_X(x) = \exp{\bigg(-\bigg(1+\xi\big(\frac{x-\mu}{\sigma}\big)\bigg)^{-1/\xi}\bigg)}$$
 
-Note, if $\xi=0$, we get the Gumbell distribution, which is easier to work with than the GEV.
+Where $x$ is supported if $x \leq \mu-\sigma/\xi$ when $\xi>0$, and $x \geq \mu-\sigma/\xi$ when $\xi<0$.
+
+Note, if $\xi=0$, we get the Gumbell distribution, which is easier to work with than the GEV:
+
+$$X \sim Gumbell(\mu,\sigma)$$
+
+$$P(X \leq x) = F_X(x) = \exp{\bigg(-\exp\bigg(-\frac{x-\mu}{\sigma}\bigg)\bigg)}$$
+
+Where $x\in\mathbb{R}$.
+
+According to extreme value theorem, a normalised sequence of IID maxima/minima of a sequence of random variables tends towards the GEV disribution.
 
 We will be using Bayesian techniques to produce uncertainty estimates for $\mu$, $\sigma$, and $\xi$.
 """
@@ -91,7 +101,7 @@ data[data.water_elevation .== minimum(data.water_elevation), :]
 
 # ╔═╡ 1266a845-d1d5-434d-8b6a-943faa680f89
 md"""
-In order to fit a GEV, we have to extract our block maxima observations. We use an annual maximum to represent our block maxima observations from 1920-2020.
+In order to fit a GEV, we have to extract our block maxima observations. We use an annual maximum to represent our block maxima observations from 1920-2020. The function below can also be used to extract block minima.
 """
 
 # ╔═╡ f098bd54-3c8c-400f-bf1a-e5e49eff80ea
@@ -132,7 +142,7 @@ Plotting the block maxima, we note the absolute maximum observation is far great
 """
 
 # ╔═╡ f865edb4-6352-4af3-a139-b4a8ce9639fc
-plot(extremes.period, extremes.water_elevation)
+plot(extremes.period, extremes.water_elevation, width=2, xlabel="Year", ylabel="Water Elevation", label="", title="Plot of Block Maxima Annual Water Elevation")
 
 # ╔═╡ 710dcb37-7a2f-4bc9-b2fc-75881ab546bd
 md"""
@@ -180,7 +190,7 @@ end;
 md"""
 We take $(n_samples) samples over $(n_chains) chains, and retain a variable for half of the samples to easily call.
 
-For simplicity, we use the No-U-Turn samples (NUTS) with the default acceptance rate of 0.65.
+For simplicity, and since our variables are continuous, we use the No-U-Turn sampler (NUTS) with the default acceptance rate of 0.65.
 """
 
 # ╔═╡ df50a52b-de23-4778-beb4-70f35486244f
@@ -373,7 +383,7 @@ md"""
 md"""
 Further to the work done above, we may also want to fit the Generalised Pareto distribution to perform peaks-over-threshold EVT analysis.
 
-In addition, it may be work analysing how a Bayesian neural network + symbolic regression may fare to produce an analytical approximation for rare events from some process.
+In addition, it may be worth analysing how a Bayesian neural network + symbolic regression may fare to produce an analytical approximation for rare events from some process.
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
