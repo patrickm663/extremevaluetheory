@@ -14,13 +14,35 @@ begin
 	using LinearAlgebra
 end
 
-# ╔═╡ b99ed376-e8e3-47d8-aeef-f685a34074a2
-using Optim
-
 # ╔═╡ 9d61b2a8-2c6b-11ee-2a88-45449dbc274c
 md"""
 # Extreme Value Theory
 """
+
+# ╔═╡ 6f55b136-45de-4329-84ca-e3e760694cce
+md"""
+Extreme value theory focusses on modelling the 'tail' events of a distribution by isolating them and fitting a distribution to explain their behavior.
+
+Two common techniques are _block maxima/minima_ (over a time-frame, extract the local maxima/minima e.g. the annual maximum observed rainfall) and _peaks over threshold_ (condition on all data above/below a threshold e.g. rainfall observations greater than 300mm). Block maxima/minima is referred to as BM and peaks over threshold as POT for convenience.
+
+The BM observations are modelled to a Generalised Extreme Value (GEV) distribution, denoted by:
+
+$$X \sim GEV(\mu,\sigma,\xi)$$
+
+According to extreme value theorem, a normalised sequence of IID maxima/minima of a sequence of random variables tends towards the GEV disribution.
+
+Note, if $\xi=0$, we get the Gumbell distribution, which is easier to work with than the GEV.
+
+We will be using Bayesian techniques to produce uncertainty estimates for $\mu$, $\sigma$, and $\xi$.
+"""
+
+# ╔═╡ 3ac0261b-acba-4b56-84fe-141e23812471
+md"""
+## Loading Packages and Data
+"""
+
+# ╔═╡ 32c6f2e1-6582-4e6c-8fd6-52fffa15be8b
+Turing.setadbackend(:forwarddiff)
 
 # ╔═╡ e9c112ba-bf9a-444c-a1d9-77e96753d0b9
 md"""
@@ -30,17 +52,50 @@ We will be using the `battery_w1` data from `pyextremes`, which measures hourly 
 # ╔═╡ 94bf401a-fe7e-4e02-af32-101b7bc813a5
 data = DataFrame(CSV.File("../data/battery_wl.csv"))
 
+# ╔═╡ 43e74166-2f0b-4e6c-833b-2cc26df4a0f3
+md"""
+## Data Preparation
+"""
+
+# ╔═╡ 36db7dfe-6102-48e1-95a9-b45b08321ee4
+md"""
+To make our time series data easier to work with, we convert the `date` column to a `DateTime()` type.
+"""
+
 # ╔═╡ e65613e3-3d13-4253-8f9c-2d29987d022d
 data.date = DateTime.(data.date);
+
+# ╔═╡ 8472cf21-15ab-4335-82f3-14677eaf86b1
+md"""
+We plot all $(size(data)[1]) observations, noting there may be some missing data where approximations were required.
+"""
 
 # ╔═╡ de1615b9-9b6b-4c73-b620-874120d801f0
 plot(data.date, data.water_elevation)
 
+# ╔═╡ 2792d1be-19f3-4bf8-9b04-098c3aafb6da
+md"""
+For reference, below is the absolute maximum observation and the date it occured.
+"""
+
 # ╔═╡ 96818ab9-3e65-4f43-b716-b8a50800185b
 data[data.water_elevation .== maximum(data.water_elevation), :]
 
+# ╔═╡ fda83796-7975-4e64-9693-6393384d159d
+md"""
+Similarly, below are the minimums:
+"""
+
+# ╔═╡ f0a70966-9ecd-47ce-8eac-17c22e10e8c1
+data[data.water_elevation .== minimum(data.water_elevation), :]
+
+# ╔═╡ 1266a845-d1d5-434d-8b6a-943faa680f89
+md"""
+In order to fit a GEV, we have to extract our block maxima observations. We use an annual maximum to represent our block maxima observations from 1920-2020.
+"""
+
 # ╔═╡ f098bd54-3c8c-400f-bf1a-e5e49eff80ea
-function block_maxima(X, period; maxima=true)
+function block_maxima(X::DataFrame, period; maxima::Bool=true)::DataFrame
 	if maxima
 		return combine(
 			groupby(
@@ -71,44 +126,66 @@ end
 # ╔═╡ 8300600f-eb78-4083-9b6d-638cec77d9ab
 extremes = block_maxima(data, year; maxima=true)
 
+# ╔═╡ 41bac213-cf38-49b5-b859-73ffad53a854
+md"""
+Plotting the block maxima, we note the absolute maximum observation is far greater than other annual maximums, suggesting a very rare event. By fitting a GEV, we can produce some likelihood of such an event occuring in general.
+"""
+
 # ╔═╡ f865edb4-6352-4af3-a139-b4a8ce9639fc
 plot(extremes.period, extremes.water_elevation)
 
+# ╔═╡ 710dcb37-7a2f-4bc9-b2fc-75881ab546bd
+md"""
+## Bayesian Parameter Estimation for GEV
+"""
+
+# ╔═╡ da9cd0e0-4c9e-4cbd-82d7-5ac620797d88
+md"""
+The GEV distribution is found in the `Distributions.jl` package, however, it has certain contraints to ensure outputs remain $\in [0,1]$.
+
+We modify our `gev()` `Turing.jl` model below to handle cases where $\xi$ is positive, negative, or equal to zero (i.e. Gumbell distributed), and assign an appropriate prior.
+
+Since sampling $\mu$ and $\sigma$ may result in different values for which $\xi$ is supported, we need to build this contraint into our model.
+"""
+
 # ╔═╡ 6be736b3-470d-46ac-b99d-d00622701e77
-@model function gev(y; ξ_start::Float64 = 0.0)
+@model function gev(y, ::Type{T} = Float64; ξ_zero::Bool = true, ξ_var::Float64 = .0001) where {T}
 	N = length(y)
 	
 	#Priors
 	μ ~ Normal(0, 5)
 	σ ~ truncated(Normal(0, 5); lower=0)
+	ξ ~ Normal(0, ξ_var)
 
-	if ξ_start == 0.0
-		ξ = 0
-	elseif ξ_start > 0
-		ξ ~ truncated(Normal(ξ_start, .1); lower=0, upper=1)
-	else
-		ξ ~ truncated(Normal(ξ_start, .1); upper=0)
-	end
-
-	if all(y .≥ μ - σ/ξ) && ξ > 0
+	if ξ_zero || ξ ≈ 0
+		y ~ filldist(GeneralizedExtremeValue(μ, σ, ξ), N)
+	elseif all(y .≥ μ - σ/ξ) && ξ > 0
 		y ~ filldist(GeneralizedExtremeValue(μ, σ, ξ), N)
 	elseif all(y .≤ μ - σ/ξ) && ξ < 0
 		y ~ filldist(GeneralizedExtremeValue(μ, σ, ξ), N)
-	elseif ξ == 0
-		y ~ filldist(GeneralizedExtremeValue(μ, σ, ξ), N)
 	end
+	return nothing
 end
 
 # ╔═╡ b5bf27ee-7179-4dc3-8078-3d3359f22016
 begin
-	n_samples = 4_000
+	n_samples = 10_000
 	n_chains = 6
 	half_sample = Int(floor(n_samples/2))
 end;
 
+# ╔═╡ f5548e91-c7e9-4101-8d7c-d7e9d5d1e67b
+md"""
+We take $(n_samples) samples over $(n_chains) chains, and retain a variable for half of the samples to easily call.
+
+For simplicity, we use the No-U-Turn samples (NUTS) with the default acceptance rate of 0.65.
+
+_After some experimenting, $\xi=0$ is the most appropriate choice._
+"""
+
 # ╔═╡ df50a52b-de23-4778-beb4-70f35486244f
 gev_sample = sample(
-	gev(extremes.water_elevation; ξ_start = 0.0),
+	gev(extremes.water_elevation; ξ_zero = false),
 	NUTS(),
 	MCMCThreads(),
 	n_samples,
@@ -116,17 +193,32 @@ gev_sample = sample(
 	discard_adapt=false
 )
 
+# ╔═╡ a6095d99-a971-44b5-9c89-7bfd498a27b0
+md"""
+Below, the posterior distributions for $\mu$ and $\sigma$ seem to converge reasonable well.
+"""
+
 # ╔═╡ 36e295e3-6365-43d3-8af6-c7090b5cbb3f
 plot(gev_sample[half_sample:end])
 
+# ╔═╡ 4f42fd70-c808-4350-a460-9718d563eac9
+md"""
+Based on the summary below, both $\mu$ and $\sigma$ have `rhat` values very close to 1, which indicates good convergance.
+"""
+
 # ╔═╡ e4cd5983-aa80-48eb-adf4-891b5ab60cd6
 describe(gev_sample)
+
+# ╔═╡ bc707b4b-b0bb-4e87-b3f2-cbba7fa162d7
+md"""
+Now, we take the mean values of our parameters. We use a `try...catch...` block in case we have preset $\xi=0$.
+"""
 
 # ╔═╡ 3a128d89-8a8d-42e6-a027-6cf0b8406505
 begin
 	μ_param = mean(gev_sample[half_sample:end, :μ, :])
 	σ_param = mean(gev_sample[half_sample:end, :σ, :])
-	ξ_param = 0.0
+	global ξ_param = 0.0
 	try 
 		ξ_param = mean(gev_sample[half_sample:end, :ξ, :])
 	catch
@@ -135,100 +227,142 @@ begin
 	gev_fitted = GeneralizedExtremeValue(μ_param, σ_param, ξ_param)
 end
 
-# ╔═╡ c79e472f-bfa9-4a92-9399-c09b14965bcb
-gev_fitted
+# ╔═╡ 1d869a4a-54a0-4920-a263-8b350e05a398
+md"""
+Below is our histogram. The GEV distribution (Gumbell) fits the annual block maxima fairly well.
+"""
 
 # ╔═╡ 874c3a42-557c-4359-9b97-888b979243ec
 begin
-	plot(sort(extremes.water_elevation), pdf.(gev_fitted, sort(extremes.water_elevation)), label="GEV PDF", width=2)
+	plot(title="Water Elevation Levels", xlabel="Water Elevation")
+	for i ∈ 100:10:n_samples
+		for j ∈ 1:n_chains
+			μ_ = mean(gev_sample[i:i, :μ, j:j])
+			σ_ = mean(gev_sample[i:i, :σ, j:j])
+			ξ_ = mean(gev_sample[i:i, :ξ, j:j])
+			gev_fitted_ = GeneralizedExtremeValue(μ_, σ_, ξ_)
+			plot!(sort(extremes.water_elevation), pdf.(gev_fitted_,
+				sort(extremes.water_elevation)), width=.1, label="")
+		end
+	end
+	plot!(sort(extremes.water_elevation), pdf.(gev_fitted,
+		sort(extremes.water_elevation)), label="GEV PDF", width=2, color="blue")
 	histogram!(extremes.water_elevation, alpha=0.3, normalize=true, label="Observed Block Maxima")
-	histogram!(data.water_elevation, normalize=true, alpha=0.2, label="All Data Points")
 end
 
-# ╔═╡ fa08f2c9-a80d-4e77-bcd8-2addccd47552
-begin
-	plot(extremes.period, pdf.(gev_fitted, extremes.water_elevation), label="Fitted", ribbon=((π^2)/6) .* gev_sample[half_sample:end, :σ, 1], width=2)
-	scatter!(extremes.period, extremes.water_elevation, label="Observed")
-end
-
-# ╔═╡ fc682c9e-4999-4c30-8013-793e9b9cffa5
-mean(extremes.water_elevation)
-
-# ╔═╡ ed048139-5d11-4c47-8aeb-0b7c714cff48
-mean(gev_fitted)
-
-# ╔═╡ b63b7a59-be08-46ea-a50a-7d04caf4c8e0
-var(extremes.water_elevation)
-
-# ╔═╡ 1e9b0222-6b6e-4f24-add0-5cd4fba1fe45
-var(gev_fitted)
+# ╔═╡ cc8b3280-eaed-4135-ae30-2b1b877fea18
+md"""
+Below is a QQ-plot, showing how well the actual observed block maxima fit the distribution:
+"""
 
 # ╔═╡ 45cbeccc-9bf9-4a7b-93d9-dabaca8cc810
 qqplot(gev_fitted, extremes.water_elevation)
 
+# ╔═╡ 44dcdc0c-d8e1-4593-b68b-57088d4c526e
+md"""
+We can also produce a quantile distribution to determine the water elevation levels at various probabilities:
+"""
+
 # ╔═╡ fc3b618a-710b-40b2-9a06-57794e482d27
 plot(0.01:0.001:0.999, quantile.(gev_fitted, 0.01:0.001:0.999))
 
-# ╔═╡ 20cd890c-a83b-4c76-9683-7fd5c175934b
+# ╔═╡ b21293e3-66e2-4019-bd03-29e065250f8f
+md"""
+For example, the 1-in-100 year annual maximum water elevation is given by:
+"""
+
+# ╔═╡ 71ba8384-2d16-461b-8741-1ec5c24af621
+quantile(gev_fitted, 0.99)
+
+# ╔═╡ cc45fe31-835d-4847-b2f7-079cef2e951b
+md"""
+This is on average -- we can add uncertainty by sampling our parameters:
+"""
+
+# ╔═╡ fd7c1d83-36d5-4015-8eac-dcb931b48fd4
 begin
-	m = gev(extremes.water_elevation; ξ_start = 0.0)
-	o = optimize(m, MLE()).values
-	gev_fitted_ = GeneralizedExtremeValue(o[1], o[2], 0.0)
-	qqplot(gev_fitted_, extremes.water_elevation)
+	plot(title="1-in-100 Year Water Elevation Levels", xlabel="1-in-100 Year Elevation", xlim=(1.9,3))
+	q_::Vector{Float64} = []
+	for i ∈ 100:n_samples
+		for j ∈ 1:n_chains
+			μ_ = mean(gev_sample[i:i, :μ, j:j])
+			σ_ = mean(gev_sample[i:i, :σ, j:j])
+			ξ_ = mean(gev_sample[i:i, :ξ, j:j])
+			gev_fitted_ = GeneralizedExtremeValue(μ_, σ_, ξ_)
+			push!(q_, quantile(gev_fitted_, 0.99))
+		end
+	end
+	histogram!(q_, normalize=:probability, label="")
 end
 
-# ╔═╡ fb4b2ff6-3e3f-4d1b-82e3-c52d7c3dab82
+# ╔═╡ 1983820b-3305-48a2-916f-260766c11ffd
 md"""
-## Gumbel GLM
+Similarly, we can identify what the probability was of the observed maximum occuring:
 """
 
-# ╔═╡ 905c8740-e1cb-49ca-82d4-86f7088f06ef
+# ╔═╡ 646449c6-d1f9-4969-9498-97c573e22344
+pdf(gev_fitted, maximum(data.water_elevation))
+
+# ╔═╡ 786f8242-aff5-484a-94f3-63a3e521610c
 md"""
-We can use the Gumbel distribution as a link function and create a model that can take in a year $t$ and output the block maxima water elevation level.
+This tells us the maximum observed elevation should happen once every $(Int(round(1/pdf(gev_fitted, maximum(data.water_elevation))))) years!
+
+Below is a histogram of the likelihood of this occuring, measured in years:
 """
 
-# ╔═╡ 21de01fe-47c1-420f-9819-66711159224b
-function gumbel_link(y)
-	return log.(-log.(y))
+# ╔═╡ 3c10f59f-27eb-4049-9fee-3d38c75ead61
+begin
+	plot(xlabel="Probability of Observed Maximum Water Elevation Levels\n1-in-n Years")
+	qmax_::Vector{Float64} = []
+	max_ = maximum(data.water_elevation)
+	for i ∈ 100:n_samples
+		for j ∈ 1:n_chains
+			μ_ = mean(gev_sample[i:i, :μ, j:j])
+			σ_ = mean(gev_sample[i:i, :σ, j:j])
+			ξ_ = mean(gev_sample[i:i, :ξ, j:j])
+			gev_fitted_ = GeneralizedExtremeValue(μ_, σ_, ξ_)
+			push!(qmax_, 1/pdf(gev_fitted_, max_))
+		end
+	end
+	histogram!(qmax_, normalize=:probability, label="", xlim=(0, 20_000))
 end
 
-# ╔═╡ d32564ef-b83b-4476-9747-be0803216f36
-function inv_gumbel_link(x)
-	return exp.(-1 .* exp.(x))
-end
-
-# ╔═╡ 3a9f4d3e-36fc-41fb-b9a3-5c5d8898d2f4
-extremes.water_elevation
-
-# ╔═╡ c077d3a6-6059-40a6-9dd4-5fccf5bdf147
-gumbel_link(0.1)
-
-# ╔═╡ 22736537-c557-4031-b77b-4d445c0c4d3c
+# ╔═╡ 942e558f-c6bc-46c5-af70-88139ed210b9
 md"""
-Want our model to be of the form:
-
-$$f(y) = βX$$
-
-Where $f(y) = \log(-\log(y))$
-
-Therefore,
-
-$$y = \exp(-\exp(βX))$$
+Finally, we can get the return period (antoher way of representing our quantile function), where we plot the 1-in-n year events and the corresponding water elevation:
 """
 
-# ╔═╡ e88ec250-b085-4c67-9a67-7eeab9a968db
-@model function gumbel_glm(X, y)
-	# Priors
-	σ ~ Normal(0, 10; lower=0)
-	β₀ ~ Normal(0, 10)
-	β₁ ~ Normal(0, 10)
-	
-	μ = β₀ .+ β₁ .* X
-	y ~ MvNormal(μ, σ * I)
+# ╔═╡ 66db6de0-d47e-4c96-8e37-3055222dada5
+function return_period_value(p, r)::Float64
+	sort_val::Vector{Float64} = copy(sort(extremes.water_elevation))
+	n_::Int64 = length(sort_val)
+	lo_::Int64 = Int(ceil(p*n_))
+	hi_::Int64 = Int(ceil((p+r)*n_))
+	return median(sort_val[lo_:hi_])
 end
 
-# ╔═╡ 4a6661b1-ab44-4c19-b3ec-33281e3a8c91
+# ╔═╡ a1cf8a69-1ebb-4fc2-9502-da580b649cd5
+begin
+	plot(xlabel="Probability of Observed Maximum Water Elevation Levels\n1-in-n Years", ylabel="Water Elevation", ylim=(0.8, 3))
+	prob_interval = 0.01:0.01:0.999
+	year_interval = 1:99
+	for i ∈ 100:10:n_samples
+		for j ∈ 1:n_chains
+			μ_ = mean(gev_sample[i:i, :μ, j:j])
+			σ_ = mean(gev_sample[i:i, :σ, j:j])
+			ξ_ = mean(gev_sample[i:i, :ξ, j:j])
+			gev_fitted_ = GeneralizedExtremeValue(μ_, σ_, ξ_)
+			plot!(year_interval, quantile.(gev_fitted_, prob_interval), label="", width=.1)
+		end
+	end
+	plot!(year_interval, quantile.(gev_fitted, prob_interval), label="Mean", color="blue", width=2)
+	scatter!(year_interval, return_period_value.(prob_interval, 0.01), label="Actual Observations", color="purple")
+end
 
+# ╔═╡ ac38e1f5-ef85-474f-89c6-f57ffdf8d7a7
+md"""
+The majority of the annual maxima seem to fit within a prediction interval, suggesting the choice of model is a good fit overall. However, for very rare extrema, the model loses accuracy.
+"""
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -239,11 +373,20 @@ Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 StatsPlots = "f3b207a7-027a-5e70-b257-86293d7955fd"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
+
+[compat]
+CSV = "~0.10.11"
+DataFrames = "~1.6.1"
+Distributions = "~0.25.100"
+ForwardDiff = "~0.10.35"
+Plots = "~1.38.17"
+StatsBase = "~0.34.0"
+StatsPlots = "~0.15.6"
+Turing = "~0.28.1"
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000002
@@ -252,7 +395,7 @@ PLUTO_MANIFEST_TOML_CONTENTS = """
 
 julia_version = "1.9.2"
 manifest_format = "2.0"
-project_hash = "378a4ec7a57361675035f8a4ea31badc616c4cb5"
+project_hash = "5cd57bfff8a40303877cc3b87b586a817e693694"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "f5c25e8a5b29b5e941b7408bc8cc79fea4d9ef9a"
@@ -261,13 +404,14 @@ version = "0.1.6"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
-git-tree-sha1 = "cad4c758c0038eea30394b1b671526921ca85b21"
+git-tree-sha1 = "d92ad398961a3ed262d8bf04a1a2b8340f915fef"
 uuid = "621f4979-c628-5d54-868e-fcf4e3e8185c"
-version = "1.4.0"
-weakdeps = ["ChainRulesCore"]
+version = "1.5.0"
+weakdeps = ["ChainRulesCore", "Test"]
 
     [deps.AbstractFFTs.extensions]
     AbstractFFTsChainRulesCoreExt = "ChainRulesCore"
+    AbstractFFTsTestExt = "Test"
 
 [[deps.AbstractMCMC]]
 deps = ["BangBang", "ConsoleProgressMonitor", "Distributed", "LogDensityProblems", "Logging", "LoggingExtras", "ProgressLogging", "Random", "StatsBase", "TerminalLoggers", "Transducers"]
@@ -298,9 +442,9 @@ weakdeps = ["StaticArrays"]
 
 [[deps.AdvancedHMC]]
 deps = ["AbstractMCMC", "ArgCheck", "DocStringExtensions", "InplaceOps", "LinearAlgebra", "LogDensityProblems", "LogDensityProblemsAD", "ProgressMeter", "Random", "Requires", "Setfield", "SimpleUnPack", "Statistics", "StatsBase", "StatsFuns"]
-git-tree-sha1 = "3bf24030e85b1d6d298e4f483f6aeff6f38462db"
+git-tree-sha1 = "d4986b2575ad5710b322a1bbc4939e0208f9f498"
 uuid = "0bf59076-c3b1-5ca4-86bd-e02cd72cde3d"
-version = "0.4.6"
+version = "0.5.3"
 
     [deps.AdvancedHMC.extensions]
     AdvancedHMCCUDAExt = "CUDA"
@@ -508,9 +652,9 @@ weakdeps = ["InverseFunctions"]
 
 [[deps.Clustering]]
 deps = ["Distances", "LinearAlgebra", "NearestNeighbors", "Printf", "Random", "SparseArrays", "Statistics", "StatsBase"]
-git-tree-sha1 = "42fe66dbc8f1d09a44aa87f18d26926d06a35f84"
+git-tree-sha1 = "b86ac2c5543660d238957dbde5ac04520ae977a7"
 uuid = "aaaa29a8-35af-508c-8bc3-b662a17a0fe5"
-version = "0.15.3"
+version = "0.15.4"
 
 [[deps.CodecZlib]]
 deps = ["TranscodingStreams", "Zlib_jll"]
@@ -564,9 +708,9 @@ version = "0.3.0"
 
 [[deps.Compat]]
 deps = ["UUIDs"]
-git-tree-sha1 = "5ce999a19f4ca23ea484e92a1774a61b8ca4cf8e"
+git-tree-sha1 = "e460f044ca8b99be31d35fe54fc33a5c33dd8ed7"
 uuid = "34da2185-b29b-5c13-b0c7-acf172513d20"
-version = "4.8.0"
+version = "4.9.0"
 weakdeps = ["Dates", "LinearAlgebra"]
 
     [deps.Compat.extensions]
@@ -632,9 +776,9 @@ version = "1.6.1"
 
 [[deps.DataStructures]]
 deps = ["Compat", "InteractiveUtils", "OrderedCollections"]
-git-tree-sha1 = "cf25ccb972fec4e4817764d01c82386ae94f77b4"
+git-tree-sha1 = "3dbd312d370723b6bb43ba9d02fc36abade4518d"
 uuid = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
-version = "0.18.14"
+version = "0.18.15"
 
 [[deps.DataValueInterfaces]]
 git-tree-sha1 = "bfc1187b79289637fa0ef6d4436ebdfe6905cbd6"
@@ -689,10 +833,10 @@ deps = ["Random", "Serialization", "Sockets"]
 uuid = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 
 [[deps.Distributions]]
-deps = ["FillArrays", "LinearAlgebra", "PDMats", "Printf", "QuadGK", "Random", "SparseArrays", "SpecialFunctions", "Statistics", "StatsAPI", "StatsBase", "StatsFuns", "Test"]
-git-tree-sha1 = "e76a3281de2719d7c81ed62c6ea7057380c87b1d"
+deps = ["FillArrays", "LinearAlgebra", "PDMats", "Printf", "QuadGK", "Random", "SpecialFunctions", "Statistics", "StatsAPI", "StatsBase", "StatsFuns", "Test"]
+git-tree-sha1 = "938fe2981db009f531b6332e31c58e9584a2f9bd"
 uuid = "31c24e10-a181-5473-b8eb-7969acd0382f"
-version = "0.25.98"
+version = "0.25.100"
 weakdeps = ["ChainRulesCore", "DensityInterface"]
 
     [deps.Distributions.extensions]
@@ -701,9 +845,9 @@ weakdeps = ["ChainRulesCore", "DensityInterface"]
 
 [[deps.DistributionsAD]]
 deps = ["Adapt", "ChainRules", "ChainRulesCore", "Compat", "Distributions", "FillArrays", "LinearAlgebra", "PDMats", "Random", "Requires", "SpecialFunctions", "StaticArrays", "StatsFuns", "ZygoteRules"]
-git-tree-sha1 = "0f8826654ec3040c67535be2d0701e854223c813"
+git-tree-sha1 = "975de103eb2175cf54bf14b15ded2c68625eabdf"
 uuid = "ced4e74d-a319-5a8a-b0ac-84af2272839c"
-version = "0.6.51"
+version = "0.6.52"
 
     [deps.DistributionsAD.extensions]
     DistributionsADForwardDiffExt = "ForwardDiff"
@@ -764,9 +908,9 @@ uuid = "2e619515-83b5-522b-bb60-26c02a35a201"
 version = "2.5.0+0"
 
 [[deps.ExprTools]]
-git-tree-sha1 = "c1d06d129da9f55715c6c212866f5b1bddc5fa00"
+git-tree-sha1 = "27415f162e6028e81c72b82ef756bf321213b6ec"
 uuid = "e2ba6199-217a-4e67-a87a-7c52f15ade04"
-version = "0.1.9"
+version = "0.1.10"
 
 [[deps.FFMPEG]]
 deps = ["FFMPEG_jll"]
@@ -806,22 +950,6 @@ deps = ["LinearAlgebra", "Random", "SparseArrays", "Statistics"]
 git-tree-sha1 = "f372472e8672b1d993e93dada09e23139b509f9e"
 uuid = "1a297f60-69ca-5386-bcde-b61e274b549b"
 version = "1.5.0"
-
-[[deps.FiniteDiff]]
-deps = ["ArrayInterface", "LinearAlgebra", "Requires", "Setfield", "SparseArrays"]
-git-tree-sha1 = "c6e4a1fbe73b31a3dea94b1da449503b8830c306"
-uuid = "6a86dc24-6348-571c-b903-95158fe2bd41"
-version = "2.21.1"
-
-    [deps.FiniteDiff.extensions]
-    FiniteDiffBandedMatricesExt = "BandedMatrices"
-    FiniteDiffBlockBandedMatricesExt = "BlockBandedMatrices"
-    FiniteDiffStaticArraysExt = "StaticArrays"
-
-    [deps.FiniteDiff.weakdeps]
-    BandedMatrices = "aae01518-5342-5314-be14-df237901396f"
-    BlockBandedMatrices = "ffab5731-97b5-5995-9138-79e8c1846df0"
-    StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [[deps.FixedPointNumbers]]
 deps = ["Statistics"]
@@ -903,10 +1031,10 @@ uuid = "28b8d3ca-fb5f-59d9-8090-bfdbd6d07a71"
 version = "0.72.9"
 
 [[deps.GR_jll]]
-deps = ["Artifacts", "Bzip2_jll", "Cairo_jll", "FFMPEG_jll", "Fontconfig_jll", "GLFW_jll", "JLLWrappers", "JpegTurbo_jll", "Libdl", "Libtiff_jll", "Pixman_jll", "Qt6Base_jll", "Zlib_jll", "libpng_jll"]
-git-tree-sha1 = "f61f768bf090d97c532d24b64e07b237e9bb7b6b"
+deps = ["Artifacts", "Bzip2_jll", "Cairo_jll", "FFMPEG_jll", "Fontconfig_jll", "FreeType2_jll", "GLFW_jll", "JLLWrappers", "JpegTurbo_jll", "Libdl", "Libtiff_jll", "Pixman_jll", "Qt6Base_jll", "Zlib_jll", "libpng_jll"]
+git-tree-sha1 = "1596bab77f4f073a14c62424283e7ebff3072eca"
 uuid = "d2c73de3-f751-5644-a686-071e5b155ba9"
-version = "0.72.9+0"
+version = "0.72.9+1"
 
 [[deps.Gettext_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Libiconv_jll", "Pkg", "XML2_jll"]
@@ -945,9 +1073,9 @@ version = "2.8.1+1"
 
 [[deps.HypergeometricFunctions]]
 deps = ["DualNumbers", "LinearAlgebra", "OpenLibm_jll", "SpecialFunctions"]
-git-tree-sha1 = "83e95aaab9dc184a6dcd9c4c52aa0dc26cd14a1d"
+git-tree-sha1 = "f218fe3736ddf977e0e772bc9a586b2383da2685"
 uuid = "34004b35-14d8-5ef3-9330-4cdb6864b03a"
-version = "0.3.21"
+version = "0.3.23"
 
 [[deps.InitialValues]]
 git-tree-sha1 = "4da0f88e9a39111c2fa3add390ab15f3a44f3ca3"
@@ -968,9 +1096,9 @@ version = "0.3.0"
 
 [[deps.IntelOpenMP_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
-git-tree-sha1 = "0cb9352ef2e01574eeebdb102948a58740dcaf83"
+git-tree-sha1 = "ad37c091f7d7daf900963171600d7c1c5c3ede32"
 uuid = "1d5cc7b8-4909-519e-a0f8-d0f5ad9712d0"
-version = "2023.1.0+0"
+version = "2023.2.0+0"
 
 [[deps.InteractiveUtils]]
 deps = ["Markdown"]
@@ -984,9 +1112,9 @@ version = "0.14.7"
 
 [[deps.IntervalSets]]
 deps = ["Dates", "Random"]
-git-tree-sha1 = "19ef25c6befb8076aefbc6f89d9011b415fb25da"
+git-tree-sha1 = "8e59ea773deee525c99a8018409f64f19fb719e6"
 uuid = "8197267c-284f-5f27-9208-e0e47529a953"
-version = "0.7.5"
+version = "0.7.7"
 weakdeps = ["Statistics"]
 
     [deps.IntervalSets.extensions]
@@ -994,9 +1122,9 @@ weakdeps = ["Statistics"]
 
 [[deps.InverseFunctions]]
 deps = ["Test"]
-git-tree-sha1 = "eabe3125edba5c9c10b60a160b1779a000dc8b29"
+git-tree-sha1 = "68772f49f54b479fa88ace904f6127f0a3bb2e46"
 uuid = "3587e190-3f89-42d0-90ee-14403ec27112"
-version = "0.1.11"
+version = "0.1.12"
 
 [[deps.InvertedIndices]]
 git-tree-sha1 = "0dc7b50b8d436461be01300fd8cd45aa0274b038"
@@ -1212,12 +1340,6 @@ git-tree-sha1 = "7f3efec06033682db852f8b3bc3c1d2b0a0ab066"
 uuid = "38a345b3-de98-5d2b-a5d3-14cd9215e700"
 version = "2.36.0+0"
 
-[[deps.LineSearches]]
-deps = ["LinearAlgebra", "NLSolversBase", "NaNMath", "Parameters", "Printf"]
-git-tree-sha1 = "7bbea35cec17305fc70a0e5b4641477dc0789d9d"
-uuid = "d3d80556-e9d4-5f37-9878-2ab0fcc64255"
-version = "7.2.0"
-
 [[deps.LinearAlgebra]]
 deps = ["Libdl", "OpenBLAS_jll", "libblastrampoline_jll"]
 uuid = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -1283,15 +1405,15 @@ version = "6.0.3"
 
 [[deps.MCMCDiagnosticTools]]
 deps = ["AbstractFFTs", "DataAPI", "DataStructures", "Distributions", "LinearAlgebra", "MLJModelInterface", "Random", "SpecialFunctions", "Statistics", "StatsBase", "StatsFuns", "Tables"]
-git-tree-sha1 = "695e91605361d1932c3e89a812be78480a4a4595"
+git-tree-sha1 = "3e6db72c2ab9cadfa3278ff388473a01fc0cfb9d"
 uuid = "be115224-59cd-429b-ad48-344e309966f0"
-version = "0.3.4"
+version = "0.3.5"
 
 [[deps.MKL_jll]]
 deps = ["Artifacts", "IntelOpenMP_jll", "JLLWrappers", "LazyArtifacts", "Libdl", "Pkg"]
-git-tree-sha1 = "154d7aaa82d24db6d8f7e4ffcfe596f40bff214b"
+git-tree-sha1 = "eb006abbd7041c28e0d16260e50a24f8f9104913"
 uuid = "856f044c-d86e-5d09-b602-aeab76dc8ba7"
-version = "2023.1.0+0"
+version = "2023.2.0+0"
 
 [[deps.MLJModelInterface]]
 deps = ["Random", "ScientificTypesBase", "StatisticalTraits"]
@@ -1354,12 +1476,6 @@ deps = ["Arpack", "LinearAlgebra", "SparseArrays", "Statistics", "StatsAPI", "St
 git-tree-sha1 = "68bf5103e002c44adfd71fea6bd770b3f0586843"
 uuid = "6f286f6a-111f-5878-ab1e-185364afe411"
 version = "0.10.2"
-
-[[deps.NLSolversBase]]
-deps = ["DiffResults", "Distributed", "FiniteDiff", "ForwardDiff"]
-git-tree-sha1 = "a0b464d183da839699f4c79e7606d9d186ec172c"
-uuid = "d41bc354-129a-5804-8e4c-c37616107c6c"
-version = "7.8.3"
 
 [[deps.NNlib]]
 deps = ["Adapt", "Atomix", "ChainRulesCore", "GPUArraysCore", "KernelAbstractions", "LinearAlgebra", "Pkg", "Random", "Requires", "Statistics"]
@@ -1439,21 +1555,15 @@ version = "1.4.1"
 
 [[deps.OpenSSL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "1aa4b74f80b01c6bc2b89992b861b5f210e665b5"
+git-tree-sha1 = "bbb5c2115d63c2f1451cb70e5ef75e8fe4707019"
 uuid = "458c3c95-2e84-50aa-8efc-19380b2a3a95"
-version = "1.1.21+0"
+version = "1.1.22+0"
 
 [[deps.OpenSpecFun_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Pkg"]
 git-tree-sha1 = "13652491f6856acfd2db29360e1bbcd4565d04f1"
 uuid = "efe28fd5-8261-553b-a9e1-b2916fc3738e"
 version = "0.5.5+0"
-
-[[deps.Optim]]
-deps = ["Compat", "FillArrays", "ForwardDiff", "LineSearches", "LinearAlgebra", "NLSolversBase", "NaNMath", "Parameters", "PositiveFactorizations", "Printf", "SparseArrays", "StatsBase"]
-git-tree-sha1 = "e3a6546c1577bfd701771b477b794a52949e7594"
-uuid = "429524aa-4258-5aef-a3af-852621145aeb"
-version = "1.7.6"
 
 [[deps.Optimisers]]
 deps = ["ChainRulesCore", "Functors", "LinearAlgebra", "Random", "Statistics"]
@@ -1483,17 +1593,11 @@ git-tree-sha1 = "67eae2738d63117a196f497d7db789821bce61d1"
 uuid = "90014a1f-27ba-587c-ab20-58faa44d9150"
 version = "0.11.17"
 
-[[deps.Parameters]]
-deps = ["OrderedCollections", "UnPack"]
-git-tree-sha1 = "34c0e9ad262e5f7fc75b10a9952ca7692cfc5fbe"
-uuid = "d96e819e-fc66-5662-9728-84c9c7592b0a"
-version = "0.12.3"
-
 [[deps.Parsers]]
 deps = ["Dates", "PrecompileTools", "UUIDs"]
-git-tree-sha1 = "4b2e829ee66d4218e0cef22c0a64ee37cf258c29"
+git-tree-sha1 = "716e24b21538abc91f6205fd1d8363f39b442851"
 uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
-version = "2.7.1"
+version = "2.7.2"
 
 [[deps.Pipe]]
 git-tree-sha1 = "6842804e7867b115ca9de748a0cf6b364523c16d"
@@ -1548,12 +1652,6 @@ deps = ["DataAPI", "Future"]
 git-tree-sha1 = "a6062fe4063cdafe78f4a0a81cfffb89721b30e7"
 uuid = "2dfb63ee-cc39-5dd5-95bd-886bf059d720"
 version = "1.4.2"
-
-[[deps.PositiveFactorizations]]
-deps = ["LinearAlgebra"]
-git-tree-sha1 = "17275485f373e6673f7e7f97051f703ed5b15b20"
-uuid = "85a6dd25-e78a-55b7-8502-1745935b8125"
-version = "0.2.4"
 
 [[deps.PrecompileTools]]
 deps = ["Preferences"]
@@ -1733,9 +1831,9 @@ version = "1.94.0"
 
 [[deps.SciMLOperators]]
 deps = ["ArrayInterface", "DocStringExtensions", "Lazy", "LinearAlgebra", "Setfield", "SparseArrays", "StaticArraysCore", "Tricks"]
-git-tree-sha1 = "745755a5b932c9a664d7e9e4beb60c692b211d4b"
+git-tree-sha1 = "65c2e6ced6f62ea796af251eb292a0e131a3613b"
 uuid = "c0aeaf25-5076-4817-a8d5-81caf7dfa961"
-version = "0.3.5"
+version = "0.3.6"
 
 [[deps.ScientificTypesBase]]
 git-tree-sha1 = "a8e18eb383b5ecf1b5e6fc237eb39255044fd92b"
@@ -1986,27 +2084,26 @@ version = "1.4.0"
 
 [[deps.Turing]]
 deps = ["AbstractMCMC", "AdvancedHMC", "AdvancedMH", "AdvancedPS", "AdvancedVI", "BangBang", "Bijectors", "DataStructures", "Distributions", "DistributionsAD", "DocStringExtensions", "DynamicPPL", "EllipticalSliceSampling", "ForwardDiff", "Libtask", "LinearAlgebra", "LogDensityProblems", "LogDensityProblemsAD", "MCMCChains", "NamedArrays", "Printf", "Random", "Reexport", "Requires", "SciMLBase", "Setfield", "SpecialFunctions", "Statistics", "StatsAPI", "StatsBase", "StatsFuns", "Tracker"]
-git-tree-sha1 = "8e62d26f99ad2cc6f496e2132a6172eabb5d27de"
+git-tree-sha1 = "6882a8be16767080b3edf2f6f2884ab71aa40e0a"
 uuid = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
-version = "0.27.0"
-weakdeps = ["Optim"]
+version = "0.28.1"
 
     [deps.Turing.extensions]
+    TuringDynamicHMCExt = "DynamicHMC"
     TuringOptimExt = "Optim"
 
+    [deps.Turing.weakdeps]
+    DynamicHMC = "bbc10e6e-7c05-544b-b16e-64fede858acb"
+    Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+
 [[deps.URIs]]
-git-tree-sha1 = "074f993b0ca030848b897beff716d93aca60f06a"
+git-tree-sha1 = "b7a5e99f24892b6824a954199a45e9ffcc1c70f0"
 uuid = "5c2747f8-b7ea-4ff2-ba2e-563bfd36b1d4"
-version = "1.4.2"
+version = "1.5.0"
 
 [[deps.UUIDs]]
 deps = ["Random", "SHA"]
 uuid = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
-
-[[deps.UnPack]]
-git-tree-sha1 = "387c1f73762231e86e0c9c5443ce3b4a0a9a0c2b"
-uuid = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
-version = "1.0.2"
 
 [[deps.Unicode]]
 uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
@@ -2019,9 +2116,9 @@ version = "0.4.1"
 
 [[deps.Unitful]]
 deps = ["Dates", "LinearAlgebra", "Random"]
-git-tree-sha1 = "c4d2a349259c8eba66a00a540d550f122a3ab228"
+git-tree-sha1 = "64eb17acef1d9734cf09967539818f38093d9b35"
 uuid = "1986cc42-f94f-5a68-af5c-568840ba703d"
-version = "1.15.0"
+version = "1.16.2"
 weakdeps = ["ConstructionBase", "InverseFunctions"]
 
     [deps.Unitful.extensions]
@@ -2099,9 +2196,9 @@ version = "1.1.34+0"
 
 [[deps.XZ_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "2222b751598bd9f4885c9ce9cd23e83404baa8ce"
+git-tree-sha1 = "cf2c7de82431ca6f39250d2fc4aacd0daa1675c0"
 uuid = "ffd25f8a-64ca-5728-b0f7-c24cf3aae800"
-version = "5.4.3+1"
+version = "5.4.4+0"
 
 [[deps.Xorg_libX11_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Xorg_libxcb_jll", "Xorg_xtrans_jll"]
@@ -2318,40 +2415,55 @@ version = "1.4.1+0"
 
 # ╔═╡ Cell order:
 # ╟─9d61b2a8-2c6b-11ee-2a88-45449dbc274c
+# ╟─6f55b136-45de-4329-84ca-e3e760694cce
+# ╟─3ac0261b-acba-4b56-84fe-141e23812471
 # ╠═24c744b6-53b6-4eaf-9156-edc42a139983
+# ╠═32c6f2e1-6582-4e6c-8fd6-52fffa15be8b
 # ╟─e9c112ba-bf9a-444c-a1d9-77e96753d0b9
 # ╠═94bf401a-fe7e-4e02-af32-101b7bc813a5
+# ╟─43e74166-2f0b-4e6c-833b-2cc26df4a0f3
+# ╟─36db7dfe-6102-48e1-95a9-b45b08321ee4
 # ╠═e65613e3-3d13-4253-8f9c-2d29987d022d
+# ╟─8472cf21-15ab-4335-82f3-14677eaf86b1
 # ╠═de1615b9-9b6b-4c73-b620-874120d801f0
+# ╟─2792d1be-19f3-4bf8-9b04-098c3aafb6da
 # ╠═96818ab9-3e65-4f43-b716-b8a50800185b
+# ╟─fda83796-7975-4e64-9693-6393384d159d
+# ╠═f0a70966-9ecd-47ce-8eac-17c22e10e8c1
+# ╟─1266a845-d1d5-434d-8b6a-943faa680f89
 # ╠═f098bd54-3c8c-400f-bf1a-e5e49eff80ea
 # ╠═8300600f-eb78-4083-9b6d-638cec77d9ab
+# ╟─41bac213-cf38-49b5-b859-73ffad53a854
 # ╠═f865edb4-6352-4af3-a139-b4a8ce9639fc
+# ╟─710dcb37-7a2f-4bc9-b2fc-75881ab546bd
+# ╟─da9cd0e0-4c9e-4cbd-82d7-5ac620797d88
 # ╠═6be736b3-470d-46ac-b99d-d00622701e77
 # ╠═b5bf27ee-7179-4dc3-8078-3d3359f22016
+# ╟─f5548e91-c7e9-4101-8d7c-d7e9d5d1e67b
 # ╠═df50a52b-de23-4778-beb4-70f35486244f
+# ╟─a6095d99-a971-44b5-9c89-7bfd498a27b0
 # ╠═36e295e3-6365-43d3-8af6-c7090b5cbb3f
+# ╟─4f42fd70-c808-4350-a460-9718d563eac9
 # ╠═e4cd5983-aa80-48eb-adf4-891b5ab60cd6
+# ╟─bc707b4b-b0bb-4e87-b3f2-cbba7fa162d7
 # ╠═3a128d89-8a8d-42e6-a027-6cf0b8406505
-# ╠═c79e472f-bfa9-4a92-9399-c09b14965bcb
+# ╟─1d869a4a-54a0-4920-a263-8b350e05a398
 # ╠═874c3a42-557c-4359-9b97-888b979243ec
-# ╠═fa08f2c9-a80d-4e77-bcd8-2addccd47552
-# ╠═fc682c9e-4999-4c30-8013-793e9b9cffa5
-# ╠═ed048139-5d11-4c47-8aeb-0b7c714cff48
-# ╠═b63b7a59-be08-46ea-a50a-7d04caf4c8e0
-# ╠═1e9b0222-6b6e-4f24-add0-5cd4fba1fe45
+# ╟─cc8b3280-eaed-4135-ae30-2b1b877fea18
 # ╠═45cbeccc-9bf9-4a7b-93d9-dabaca8cc810
+# ╟─44dcdc0c-d8e1-4593-b68b-57088d4c526e
 # ╠═fc3b618a-710b-40b2-9a06-57794e482d27
-# ╠═b99ed376-e8e3-47d8-aeef-f685a34074a2
-# ╠═20cd890c-a83b-4c76-9683-7fd5c175934b
-# ╟─fb4b2ff6-3e3f-4d1b-82e3-c52d7c3dab82
-# ╟─905c8740-e1cb-49ca-82d4-86f7088f06ef
-# ╠═21de01fe-47c1-420f-9819-66711159224b
-# ╠═d32564ef-b83b-4476-9747-be0803216f36
-# ╠═3a9f4d3e-36fc-41fb-b9a3-5c5d8898d2f4
-# ╠═c077d3a6-6059-40a6-9dd4-5fccf5bdf147
-# ╟─22736537-c557-4031-b77b-4d445c0c4d3c
-# ╠═e88ec250-b085-4c67-9a67-7eeab9a968db
-# ╠═4a6661b1-ab44-4c19-b3ec-33281e3a8c91
+# ╟─b21293e3-66e2-4019-bd03-29e065250f8f
+# ╠═71ba8384-2d16-461b-8741-1ec5c24af621
+# ╟─cc45fe31-835d-4847-b2f7-079cef2e951b
+# ╠═fd7c1d83-36d5-4015-8eac-dcb931b48fd4
+# ╟─1983820b-3305-48a2-916f-260766c11ffd
+# ╠═646449c6-d1f9-4969-9498-97c573e22344
+# ╟─786f8242-aff5-484a-94f3-63a3e521610c
+# ╠═3c10f59f-27eb-4049-9fee-3d38c75ead61
+# ╟─942e558f-c6bc-46c5-af70-88139ed210b9
+# ╠═66db6de0-d47e-4c96-8e37-3055222dada5
+# ╠═a1cf8a69-1ebb-4fc2-9502-da580b649cd5
+# ╟─ac38e1f5-ef85-474f-89c6-f57ffdf8d7a7
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
