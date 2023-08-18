@@ -141,11 +141,13 @@ md"""
 
 # ╔═╡ da9cd0e0-4c9e-4cbd-82d7-5ac620797d88
 md"""
-The GEV distribution is found in the `Distributions.jl` package, however, it has certain contraints to ensure outputs remain $\in [0,1]$.
+The GEV distribution is found in the `Distributions.jl` package, however, it has certain constraints to ensure outputs remain $\in [0,1]$.
 
 We modify our `gev()` `Turing.jl` model below to handle cases where $\xi$ is positive, negative, or equal to zero (i.e. Gumbell distributed), and assign an appropriate prior.
 
-Since sampling $\mu$ and $\sigma$ may result in different values for which $\xi$ is supported, we need to build this contraint into our model.
+Since sampling $\mu$ and $\sigma$ may result in different values for which $\xi$ is supported, we need to build this constraint into our model.
+
+_After some experimentation, $\xi=0$ is the best choice. For that reason, we set a very small variance prior. A different dataset may be required to ensure the function below works as intended for $\xi\ne0$._
 """
 
 # ╔═╡ 6be736b3-470d-46ac-b99d-d00622701e77
@@ -179,8 +181,6 @@ md"""
 We take $(n_samples) samples over $(n_chains) chains, and retain a variable for half of the samples to easily call.
 
 For simplicity, we use the No-U-Turn samples (NUTS) with the default acceptance rate of 0.65.
-
-_After some experimenting, $\xi=0$ is the most appropriate choice._
 """
 
 # ╔═╡ df50a52b-de23-4778-beb4-70f35486244f
@@ -362,6 +362,18 @@ end
 # ╔═╡ ac38e1f5-ef85-474f-89c6-f57ffdf8d7a7
 md"""
 The majority of the annual maxima seem to fit within a prediction interval, suggesting the choice of model is a good fit overall. However, for very rare extrema, the model loses accuracy.
+"""
+
+# ╔═╡ d8987ae7-5f62-4e25-a4d3-ccfddb1921fb
+md"""
+## TODO
+"""
+
+# ╔═╡ e5a7feda-2b10-4be5-ac59-50f89058b3f6
+md"""
+Further to the work done above, we may also want to fit the Generalised Pareto distribution to perform peaks-over-threshold EVT analysis.
+
+In addition, it may be work analysing how a Bayesian neural network + symbolic regression may fare to produce an analytical approximation for rare events from some process.
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -2465,5 +2477,7 @@ version = "1.4.1+0"
 # ╠═66db6de0-d47e-4c96-8e37-3055222dada5
 # ╠═a1cf8a69-1ebb-4fc2-9502-da580b649cd5
 # ╟─ac38e1f5-ef85-474f-89c6-f57ffdf8d7a7
+# ╟─d8987ae7-5f62-4e25-a4d3-ccfddb1921fb
+# ╟─e5a7feda-2b10-4be5-ac59-50f89058b3f6
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
